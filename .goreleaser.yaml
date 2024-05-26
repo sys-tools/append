@@ -1,0 +1,36 @@
+# .goreleaser.yml
+project_name: appendonlylog
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+    - go test ./... -coverpkg=./... -v --short
+
+release:
+  github:
+    owner: adhaamehab
+    name: append
+
+builds:
+  - id: package
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: .
+    binary: appendonlylog
+    ldflags:
+      - -s -w
+    env:
+      - CGO_ENABLED=0
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
