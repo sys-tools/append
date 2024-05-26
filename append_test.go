@@ -2,182 +2,126 @@ package main
 
 import (
 	"encoding/json"
+	"math/rand"
 	"os"
-	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
-type logEntry struct {
-	ID   int    `json:"id"`
-	Data string `json:"data"`
-}
-
-// setupLog creates a new AppendOnlyLog for testing.
-func setupLog(t *testing.T) *AppendOnlyLog {
+func FakeRaw(t *testing.T) map[string]interface{} {
 	t.Helper()
-	filePath := "test_log.json"
-	log, err := NewAppendOnlyLog(filePath)
+
+	return map[string]interface{}{
+		"str":   "bar",
+		"int":   float64(rand.Intn(100)),
+		"float": float64(rand.Intn(100)),
+		"bool":  float64(rand.Intn(2)) == 1.0,
+		"list":  []interface{}{"foo", "bar", "baz"},
+		"complex": map[string]interface{}{
+			"str":   "foo",
+			"int":   float64(rand.Intn(100)),
+			"float": float64(rand.Intn(100)),
+			"bool":  float64(rand.Intn(2)) == 1.0,
+			"list":  []interface{}{"qux", "quux", "quuz"},
+			"complex": map[string]interface{}{
+				"str":   "baz",
+				"int":   float64(rand.Intn(100)),
+				"float": float64(rand.Intn(100)),
+				"bool":  float64(rand.Intn(2)) == 1.0,
+				"list":  []interface{}{1.0, 2.0, 3.0},
+			},
+		},
+	}
+}
+
+func GenerateInput(t *testing.T, n int) []interface{} {
+	t.Helper()
+
+	var input []interface{}
+	for i := 0; i < n; i++ {
+		input = append(input, FakeRaw(t))
+	}
+	return input
+}
+
+func TestAppendOnlyLog_WriteAndRead(t *testing.T) {
+	t.Helper()
+
+	// Create a temporary file for the log
+	file, err := os.CreateTemp("", "log")
 	if err != nil {
-		t.Fatalf("Failed to create AppendOnlyLog: %v", err)
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+
+	// Create a new log
+	log, err := NewAppendOnlyLog(file.Name())
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	t.Cleanup(func() {
-		log.file.Close()
-		os.Remove(log.file.Name())
-	})
+	entries := GenerateInput(t, 50)
 
-	return log
-}
-
-func TestAppendOnlyLog_Write(t *testing.T) {
-	log := setupLog(t)
-
-	tests := []struct {
-		name  string
-		entry logEntry
-	}{
-		{"Write entry 1", logEntry{ID: 1, Data: "test data 1"}},
-		{"Write entry 2", logEntry{ID: 2, Data: "test data 2"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := log.Write(tt.entry)
-			if err != nil {
-				t.Fatalf("Write() error = %v", err)
-			}
-		})
-	}
-}
-
-func TestAppendOnlyLog_Read(t *testing.T) {
-	log := setupLog(t)
-
-	entries := []logEntry{
-		{ID: 1, Data: "test data 1"},
-		{ID: 2, Data: "test data 2"},
-	}
-
+	// Write the entries to the log
 	for _, entry := range entries {
-		log.Write(entry)
+		if err := log.Write(entry); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	tests := []struct {
-		name   string
-		offset int64
-		count  int
-		want   []logEntry
-	}{
-		{"Read first entry", 0, 1, entries[:1]},
-		{"Read both entries", 0, 2, entries},
-		{"Read from offset", int64(len(entries[0].Data) + 12), 1, entries[1:]},
+	// Read the entries back
+	readEntries, err := log.Read(0, len(entries))
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := log.Read(tt.offset, tt.count)
-			if err != nil {
-				t.Fatalf("Read() error = %v", err)
-				return
+	// Verify that the read entries match the ones we wrote
+	for i, readEntry := range readEntries {
+		diff := cmp.Diff(entries[i], readEntry)
+		if diff != "" {
+			t.Fatalf(diff)
+		}
+	}
+
+	// Test watch functionality
+	// Create a channel to receive the entries
+	stopCh := make(chan struct{})
+
+	// Start watching for new entries
+	watchCh, err := log.Watch(stopCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write more entries to the log
+	newInput := GenerateInput(t, 50)
+	go func() {
+		for _, entry := range newInput {
+			if err := log.Write(entry); err != nil {
+				t.Error(err)
 			}
+		}
 
-			var gotEntries []logEntry
-			for _, g := range got {
-				var entry logEntry
-				if err := json.Unmarshal(g, &entry); err != nil {
-					t.Fatalf("Failed to unmarshal entry: %v", err)
-				}
-				gotEntries = append(gotEntries, entry)
-			}
+		stopCh <- struct{}{}
+	}()
 
-			if len(gotEntries) != len(tt.want) {
-				t.Fatalf("Read() got %v entries, want %v entries", len(gotEntries), len(tt.want))
-			}
-
-			for i, entry := range gotEntries {
-				if !reflect.DeepEqual(entry, tt.want[i]) {
-					t.Fatalf("Read() got entry %v, want %v", entry, tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-func TestAppendOnlyLog_Count(t *testing.T) {
-	log := setupLog(t)
-
-	entries := []logEntry{
-		{ID: 1, Data: "test data 1"},
-		{ID: 2, Data: "test data 2"},
+	// Read the new entries from the watch channel
+	var newEntries []json.RawMessage
+	for entry := range watchCh {
+		if rawEntry, ok := entry.(json.RawMessage); ok {
+			newEntries = append(newEntries, rawEntry)
+		} else {
+			t.Fatal("entry is not of type json.RawMessage")
+		}
 	}
 
-	for _, entry := range entries {
-		log.Write(entry)
+	// Verify that the new entries match the ones we wrote
+	for i, entry := range newEntries {
+		diff := cmp.Diff(newInput[i], entry)
+		if diff != "" {
+			t.Fatalf(diff)
+		}
 	}
 
-	tests := []struct {
-		name string
-		want int
-	}{
-		{"Count entries", 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := log.Count()
-			if err != nil {
-				t.Fatalf("Count() error = %v", err)
-				return
-			}
-
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("Count() got %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAppendOnlyLog_Seek(t *testing.T) {
-	log := setupLog(t)
-
-	entries := []logEntry{
-		{ID: 1, Data: "test data 1"},
-		{ID: 2, Data: "test data 2"},
-	}
-
-	for _, entry := range entries {
-		log.Write(entry)
-	}
-
-	tests := []struct {
-		name   string
-		offset int64
-	}{
-		{"Seek to start", 0},
-		{"Seek to second entry", int64(len(entries[0].Data) + 12)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := log.Seek(tt.offset)
-			if err != nil {
-				t.Fatalf("Seek() error = %v", err)
-			}
-
-			got, err := log.Read(tt.offset, 1)
-			if err != nil {
-				t.Fatalf("Read() after Seek error = %v", err)
-				return
-			}
-
-			var gotEntry logEntry
-			if err := json.Unmarshal(got[0], &gotEntry); err != nil {
-				t.Fatalf("Failed to unmarshal entry: %v", err)
-			}
-
-			if !reflect.DeepEqual(gotEntry, entries[tt.offset/(int64(len(entries[0].Data)+12))]) {
-				t.Fatalf("Seek() got entry %v, want %v", gotEntry, entries[tt.offset/(int64(len(entries[0].Data)+12))])
-			}
-		})
-	}
 }

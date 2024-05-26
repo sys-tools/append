@@ -50,24 +50,33 @@ func (log *AppendOnlyLog) Write(entry interface{}) error {
 		return err
 	}
 
+	// Save the current offset
+	oldOffset := log.offset
+
+	// Update the offset
+	log.offset += int64(len(data) + 1)
+
 	_, err = log.file.Write(data)
 	if err != nil {
+		// Roll back the offset if the write operation failed
+		log.offset = oldOffset
 		return err
 	}
 
 	_, err = log.file.Write([]byte("\n"))
 	if err != nil {
+		// Roll back the offset if the write operation failed
+		log.offset = oldOffset
 		return err
 	}
 
-	log.offset += int64(len(data) + 1)
 	return nil
 }
 
 // Read reads entries from the log starting from the given offset.
 // It reads count number of entries or until it reaches the end of the file.
 // It returns the read entries or an error if one occurred during the reading process.
-func (log *AppendOnlyLog) Read(offset int64, count int) ([]json.RawMessage, error) {
+func (log *AppendOnlyLog) Read(offset int64, count int) ([]interface{}, error) {
 	log.mutex.Lock()
 	defer log.mutex.Unlock()
 
@@ -75,11 +84,13 @@ func (log *AppendOnlyLog) Read(offset int64, count int) ([]json.RawMessage, erro
 		return nil, err
 	}
 
-	var entries []json.RawMessage
+	log.offset = offset
+
+	var entries []interface{}
 	decoder := json.NewDecoder(log.file)
 
 	for i := 0; i < count; i++ {
-		var entry json.RawMessage
+		var entry interface{}
 		if err := decoder.Decode(&entry); err != nil {
 			if err == io.EOF {
 				break
@@ -96,8 +107,8 @@ func (log *AppendOnlyLog) Read(offset int64, count int) ([]json.RawMessage, erro
 // It sends new entries through the returned channel.
 // The watching can be stopped by sending a signal to the provided stopCh channel.
 // It returns an error if one occurred during the watching process.
-func (log *AppendOnlyLog) Watch(stopCh <-chan struct{}) (<-chan json.RawMessage, error) {
-	outCh := make(chan json.RawMessage)
+func (log *AppendOnlyLog) Watch(stopCh <-chan struct{}) (<-chan interface{}, error) {
+	outCh := make(chan interface{})
 
 	go func() {
 		defer close(outCh)
@@ -108,7 +119,7 @@ func (log *AppendOnlyLog) Watch(stopCh <-chan struct{}) (<-chan json.RawMessage,
 			case <-stopCh:
 				return
 			default:
-				var entry json.RawMessage
+				var entry interface{}
 				if err := decoder.Decode(&entry); err != nil {
 					if err == io.EOF {
 						continue
