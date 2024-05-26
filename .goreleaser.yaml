@@ -1,5 +1,5 @@
 # .goreleaser.yml
-project_name: appendonlylog
+project_name: append
 
 before:
   hooks:
